@@ -1,18 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import type { Category, ReportUrgency } from "@/lib/types";
+import type { Category } from "@/lib/types";
+import {
+  computeReportUrgency,
+  urgencyLabelHr,
+} from "@/lib/report-urgency";
 import { AiSuggestButton } from "./ai-suggest-button";
-
-const ZAGREB_LAT = 45.815;
-const ZAGREB_LNG = 15.9819;
-
-const URGENCY_OPTIONS: { value: ReportUrgency; label: string }[] = [
-  { value: "high", label: "Hitno" },
-  { value: "medium", label: "Srednje" },
-  { value: "low", label: "Nije hitno" },
-];
 
 function extFromFile(file: File): string {
   const n = file.name.toLowerCase();
@@ -37,18 +32,31 @@ export function NewReportForm({
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
+  const [streetQuery, setStreetQuery] = useState("");
+  const [placeLabel, setPlaceLabel] = useState<string | null>(null);
+  const [lat, setLat] = useState<number | null>(null);
+  const [lng, setLng] = useState<number | null>(null);
+
   const [description, setDescription] = useState("");
   const [categoryId, setCategoryId] = useState(categories[0]?.id ?? "");
-  const [urgency, setUrgency] = useState<ReportUrgency>("medium");
-  const [lat, setLat] = useState(String(ZAGREB_LAT));
-  const [lng, setLng] = useState(String(ZAGREB_LNG));
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [geoLoading, setGeoLoading] = useState(false);
+  const [geocodeLoading, setGeocodeLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "ok" | "err";
     text: string;
   } | null>(null);
+
+  const selectedCategory = useMemo(
+    () => categories.find((c) => c.id === categoryId),
+    [categories, categoryId],
+  );
+
+  const computedUrgency = useMemo(() => {
+    if (!selectedCategory) return null;
+    return computeReportUrgency(selectedCategory, description);
+  }, [selectedCategory, description]);
 
   const pickFile = (f: File | null) => {
     setFile(f);
@@ -56,6 +64,54 @@ export function NewReportForm({
       setMessage(null);
     }
   };
+
+  async function resolveAddress() {
+    setGeocodeLoading(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: streetQuery }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        lat?: number;
+        lng?: number;
+        displayName?: string;
+      };
+      if (!res.ok) {
+        setMessage({
+          type: "err",
+          text: data.error ?? "Geokodiranje nije uspjelo.",
+        });
+        return;
+      }
+      if (
+        typeof data.lat !== "number" ||
+        typeof data.lng !== "number" ||
+        Number.isNaN(data.lat) ||
+        Number.isNaN(data.lng)
+      ) {
+        setMessage({
+          type: "err",
+          text: "Neočekivani odgovor servisa za adresu.",
+        });
+        return;
+      }
+      setLat(data.lat);
+      setLng(data.lng);
+      setPlaceLabel(data.displayName ?? streetQuery.trim());
+      setMessage({ type: "ok", text: "Adresa pronađena." });
+    } catch {
+      setMessage({
+        type: "err",
+        text: "Mrežna greška pri traženju adrese.",
+      });
+    } finally {
+      setGeocodeLoading(false);
+    }
+  }
 
   const useGeolocation = () => {
     if (!navigator.geolocation) {
@@ -69,8 +125,9 @@ export function NewReportForm({
     setMessage(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setLat(String(pos.coords.latitude.toFixed(6)));
-        setLng(String(pos.coords.longitude.toFixed(6)));
+        setLat(pos.coords.latitude);
+        setLng(pos.coords.longitude);
+        setPlaceLabel("Trenutna lokacija (GPS)");
         setGeoLoading(false);
         setMessage({ type: "ok", text: "Lokacija s uređaja učitana." });
       },
@@ -78,7 +135,7 @@ export function NewReportForm({
         setGeoLoading(false);
         setMessage({
           type: "err",
-          text: "Dozvola za lokaciju odbijena ili nedostupna. Unesi koordinate ručno.",
+          text: "GPS nije dostupan. Pokušaj unijeti ulicu i pritisnuti „Pronađi adresu”.",
         });
       },
       { enableHighAccuracy: true, timeout: 12_000 },
@@ -88,13 +145,15 @@ export function NewReportForm({
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMessage(null);
-    const latN = Number.parseFloat(lat.replace(",", "."));
-    const lngN = Number.parseFloat(lng.replace(",", "."));
-    if (Number.isNaN(latN) || Number.isNaN(lngN)) {
-      setMessage({ type: "err", text: "Lat i lng moraju biti valjani brojevi." });
+
+    if (lat === null || lng === null) {
+      setMessage({
+        type: "err",
+        text: "Postavi lokaciju: upiši ulicu i „Pronađi adresu” ili koristi GPS.",
+      });
       return;
     }
-    if (latN < -90 || latN > 90 || lngN < -180 || lngN > 180) {
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
       setMessage({ type: "err", text: "Koordinate su izvan dopuštenog raspona." });
       return;
     }
@@ -103,10 +162,12 @@ export function NewReportForm({
       setMessage({ type: "err", text: "Unesi opis problema (barem prvi redak)." });
       return;
     }
-    if (!categoryId) {
+    if (!categoryId || !selectedCategory) {
       setMessage({ type: "err", text: "Odaberi kategoriju." });
       return;
     }
+
+    const urgency = computeReportUrgency(selectedCategory, description);
 
     setLoading(true);
     const supabase = createClient();
@@ -119,8 +180,7 @@ export function NewReportForm({
       return;
     }
 
-    const cat = categories.find((c) => c.id === categoryId);
-    const score = cat?.inherent_weight ?? 1;
+    const score = selectedCategory.inherent_weight ?? 1;
 
     let imagePath: string | null = null;
     if (file) {
@@ -147,8 +207,8 @@ export function NewReportForm({
       user_id: user.id,
       title,
       description: description.trim() || null,
-      lat: latN,
-      lng: lngN,
+      lat,
+      lng,
       category_id: categoryId,
       urgency,
       image_path: imagePath,
@@ -166,11 +226,12 @@ export function NewReportForm({
     setMessage({ type: "ok", text: "Prijava je spremljena." });
     setDescription("");
     setFile(null);
+    setStreetQuery("");
+    setPlaceLabel(null);
+    setLat(null);
+    setLng(null);
     if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (galleryInputRef.current) galleryInputRef.current.value = "";
-    setLat(String(ZAGREB_LAT));
-    setLng(String(ZAGREB_LNG));
-    setUrgency("medium");
   }
 
   return (
@@ -189,40 +250,48 @@ export function NewReportForm({
 
       <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-700">
         <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-          Lokacija problema
+          Lokacija (ulica i kućni broj)
         </p>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Zadano je središte Zagreba. Na mobitelu možeš uključiti GPS ili unijeti
-          stupnjeve ručno.
+          Upiši adresu u Zagrebu, zatim „Pronađi adresu”. Možeš i koristiti GPS ako
+          si na mjestu događaja.
         </p>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            value={streetQuery}
+            onChange={(e) => setStreetQuery(e.target.value)}
+            placeholder="Npr. Ilica 42 ili Trg bana Jelačića"
+            className="min-w-0 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-50"
+          />
+          <button
+            type="button"
+            onClick={() => void resolveAddress()}
+            disabled={geocodeLoading || streetQuery.trim().length < 3}
+            className="shrink-0 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            {geocodeLoading ? "Tražim…" : "Pronađi adresu"}
+          </button>
+        </div>
         <button
           type="button"
           onClick={useGeolocation}
           disabled={geoLoading}
-          className="mt-3 rounded-lg bg-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-900 transition hover:bg-zinc-300 disabled:opacity-60 dark:bg-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-600"
+          className="mt-3 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-800 transition hover:bg-zinc-50 disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
         >
-          {geoLoading ? "Dohvaćam lokaciju…" : "Koristi moju lokaciju"}
+          {geoLoading ? "Dohvaćam GPS…" : "Koristi moju lokaciju (GPS)"}
         </button>
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-            Lat
-            <input
-              value={lat}
-              onChange={(e) => setLat(e.target.value)}
-              inputMode="decimal"
-              className="rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-50"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-            Lng
-            <input
-              value={lng}
-              onChange={(e) => setLng(e.target.value)}
-              inputMode="decimal"
-              className="rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-50"
-            />
-          </label>
-        </div>
+        {placeLabel !== null && lat !== null && lng !== null ? (
+          <p className="mt-3 rounded-lg bg-zinc-100 px-3 py-2 text-xs text-zinc-700 dark:bg-zinc-800/80 dark:text-zinc-300">
+            <span className="font-medium">Postavljeno:</span> {placeLabel}
+            <span className="mt-1 block font-mono text-zinc-500 dark:text-zinc-400">
+              {lat.toFixed(5)}, {lng.toFixed(5)}
+            </span>
+          </p>
+        ) : (
+          <p className="mt-3 text-xs text-amber-800 dark:text-amber-200/90">
+            Lokacija još nije postavljena — potrebna je prije slanja prijave.
+          </p>
+        )}
       </div>
 
       <label className="flex flex-col gap-1.5 text-sm font-medium text-zinc-800 dark:text-zinc-200">
@@ -256,35 +325,23 @@ export function NewReportForm({
         </select>
       </label>
 
-      <fieldset className="flex flex-col gap-2">
-        <legend className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-          Hitnost
-        </legend>
-        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          {URGENCY_OPTIONS.map((o) => (
-            <label
-              key={o.value}
-              className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300"
-            >
-              <input
-                type="radio"
-                name="urgency"
-                value={o.value}
-                checked={urgency === o.value}
-                onChange={() => setUrgency(o.value)}
-              />
-              {o.label}
-            </label>
-          ))}
+      {computedUrgency ? (
+        <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/40">
+          <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            Procijenjena hitnost
+          </p>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            Računa se automatski iz opisa i kategorije:{" "}
+            <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+              {urgencyLabelHr(computedUrgency)}
+            </span>
+          </p>
         </div>
-      </fieldset>
+      ) : null}
 
       <div>
         <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
           Fotografija (opcionalno)
-        </p>
-        <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-          Uslikaj ili odaberi iz galerije.
         </p>
         <input
           ref={cameraInputRef}
@@ -301,22 +358,20 @@ export function NewReportForm({
           className="sr-only"
           onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
         />
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => galleryInputRef.current?.click()}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
-          >
-            Iz galerije
-          </button>
-          <button
-            type="button"
-            onClick={() => cameraInputRef.current?.click()}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
-          >
-            Uslikaj
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => cameraInputRef.current?.click()}
+          className="mt-3 w-full rounded-xl bg-zinc-900 px-4 py-4 text-base font-semibold text-white shadow-sm transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+        >
+          Slikaj
+        </button>
+        <button
+          type="button"
+          onClick={() => galleryInputRef.current?.click()}
+          className="mt-2 w-full text-center text-sm text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-400"
+        >
+          Ili odaberi fotografiju iz galerije
+        </button>
         {file ? (
           <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
             Odabrano: {file.name}

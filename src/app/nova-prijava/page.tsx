@@ -29,8 +29,8 @@ export default async function NovaPrijavaPage() {
   return (
     <div className="mx-auto flex w-full max-w-lg flex-1 flex-col px-4 py-8">
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        Lokacija (GPS ili ručno), opis, kategorija i po želji fotografija s kamere
-        ili iz galerije.
+        Lokacija po ulici (ili GPS), opis, kategorija; hitnost se računa
+        automatski. Po želji slika — gumb Slikaj ili galerija.
       </p>
 
       <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
